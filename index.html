@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PlayMax TV — Stream Movies, TV Shows, Sports & Anime</title>
+    <meta name="description" content="PlayMax TV — Your ultimate streaming destination for movies, TV shows, sports, cartoons, and anime. Watch unlimited content with PlayMax+ Premium." />
+    <meta name="keywords" content="PlayMax TV, streaming, movies, TV shows, sports, anime, cartoons, watch online, Nigeria, PlayMax Plus" />
+    <meta name="author" content="PlayMax TV" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://playmaxtv.onspace.app" />
+    <meta property="og:title" content="PlayMax TV — Stream Movies, TV Shows, Sports & Anime" />
+    <meta property="og:description" content="Your ultimate streaming destination. Watch unlimited movies, TV shows, sports, anime and more with PlayMax TV." />
+    <meta property="og:image" content="/og-image.jpg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="PlayMax TV — Stream Movies, TV Shows, Sports & Anime" />
+    <meta name="twitter:description" content="Your ultimate streaming destination. Watch unlimited content with PlayMax TV." />
+    <meta name="twitter:image" content="/og-image.jpg" />
+
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#e50914" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="PlayMax TV" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebSite",
+      "name": "PlayMax TV",
+      "url": "https://playmaxtv.onspace.app",
+      "description": "Your ultimate streaming destination for movies, TV shows, sports, cartoons, and anime."
+    }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js').catch(() => {});
+        });
+      }
+    </script>
+  </body>
+</html>
