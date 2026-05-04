@@ -3,7 +3,7 @@ import { corsHeaders } from '../_shared/cors.ts';
 const SB_BASE = 'https://movieapi.xcasper.space/api';
 const OMEGA_BASE = 'https://omegatech-api.dixonomega.tech/api/movie';
 
-const BH = {
+const BH: Record<string, string> = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Accept': 'application/json, text/plain, */*',
   'Accept-Language': 'en-US,en;q=0.9',
@@ -16,73 +16,111 @@ interface StreamObj {
   resolutions: string;
   proxyUrl: string;
   downloadUrl: string;
+  url?: string;
+}
+
+interface SubtitleObj {
+  language: string;
+  languageCode: string;
+  url: string;
+}
+
+interface AudioTrackObj {
+  language: string;
+  languageCode: string;
+  isOriginal: boolean;
+  subjectId: string;
+  detailPath?: string;
 }
 
 /**
- * Build the 4 quality stream URLs directly from XCASPER subjectId.
- * Format: https://movieapi.xcasper.space/api/bff/stream?subjectId=ID&resolution=720
- * These URLs serve video bytes directly in the browser <video> element.
+ * Call /api/play?subjectId=ID — returns streams, subtitles, audioTracks.
+ * This is the CORRECT endpoint for getting playable stream URLs.
  */
-function buildXcasperStreams(subjectId: string): StreamObj[] {
+async function fetchPlayEndpoint(subjectId: string): Promise<{
+  streams: StreamObj[];
+  subtitles: SubtitleObj[];
+  audioTracks: AudioTrackObj[];
+} | null> {
+  try {
+    const url = `${SB_BASE}/play?subjectId=${subjectId}`;
+    console.log('[stream-proxy] Calling /api/play:', url);
+    const r = await fetch(url, { headers: BH });
+    if (!r.ok) {
+      console.warn('[stream-proxy] /api/play returned', r.status);
+      return null;
+    }
+    const json = await r.json();
+    const data = json.data || json;
+
+    const streams: StreamObj[] = (data.streams || [])
+      .filter((s: Record<string, unknown>) => s.proxyUrl || s.url)
+      .map((s: Record<string, unknown>) => ({
+        quality: String(s.resolutions || s.resolution || ''),
+        resolutions: String(s.resolutions || s.resolution || ''),
+        proxyUrl: String(s.proxyUrl || ''),
+        downloadUrl: String(s.downloadUrl || s.proxyUrl || ''),
+        url: String(s.url || ''),
+      }));
+
+    const subtitles: SubtitleObj[] = (data.subtitles || [])
+      .filter((s: Record<string, unknown>) => s.url)
+      .map((s: Record<string, unknown>) => ({
+        language: String(s.language || ''),
+        languageCode: String(s.languageCode || ''),
+        url: String(s.url || ''),
+      }));
+
+    const audioTracks: AudioTrackObj[] = (data.audioTracks || [])
+      .filter((a: Record<string, unknown>) => a.subjectId)
+      .map((a: Record<string, unknown>) => ({
+        language: String(a.language || ''),
+        languageCode: String(a.languageCode || ''),
+        isOriginal: Boolean(a.isOriginal),
+        subjectId: String(a.subjectId || ''),
+        detailPath: a.detailPath ? String(a.detailPath) : undefined,
+      }));
+
+    console.log('[stream-proxy] /api/play streams:', streams.length, '| subtitles:', subtitles.length, '| audio:', audioTracks.length);
+    return { streams, subtitles, audioTracks };
+  } catch (e) {
+    console.error('[stream-proxy] /api/play error:', e);
+    return null;
+  }
+}
+
+/**
+ * Build bff/stream URLs as fallback when /api/play fails or returns empty.
+ * Format: /api/bff/stream?subjectId=ID&resolution=720
+ * For TV episodes with season/episode: /api/bff/stream?subjectId=ID&season=S&episode=E&resolution=720
+ */
+function buildBffStreams(subjectId: string, season?: number, episode?: number): StreamObj[] {
   const resolutions = ['1080', '720', '480', '360'];
+  const baseParams = season !== undefined && episode !== undefined
+    ? `subjectId=${subjectId}&season=${season}&episode=${episode}`
+    : `subjectId=${subjectId}`;
+
   return resolutions.map(res => ({
     quality: `${res}p`,
     resolutions: res,
-    proxyUrl: `${SB_BASE}/bff/stream?subjectId=${subjectId}&resolution=${res}`,
-    downloadUrl: `${SB_BASE}/bff/stream?subjectId=${subjectId}&resolution=${res}&download=1`,
+    proxyUrl: `${SB_BASE}/bff/stream?${baseParams}&resolution=${res}`,
+    downloadUrl: `${SB_BASE}/bff/stream?${baseParams}&resolution=${res}&download=1`,
   }));
 }
 
 /**
- * Try to get subtitle URL for a subject.
- * Returns a .vtt URL if found.
+ * Omega fallback for TV series sources (when episode subjectId not available).
  */
-async function fetchSubtitle(subjectId: string, lang = 'en'): Promise<string | null> {
+async function tryOmegaSeries(
+  xcasperId: string,
+  season: number,
+  episode: number,
+  detailPath?: string
+): Promise<StreamObj[] | null> {
   try {
-    // Try XCASPER captions endpoint
-    const url = `${SB_BASE}/captions?subjectId=${subjectId}&lang=${lang}`;
-    const r = await fetch(url, { headers: BH });
-    if (!r.ok) return null;
-    const json = await r.json();
-    // Look for a .vtt or .srt URL in response
-    const walk = (obj: unknown): string | null => {
-      if (!obj || typeof obj !== 'object') return null;
-      if (typeof obj === 'string' && (obj.endsWith('.vtt') || obj.endsWith('.srt'))) return obj;
-      for (const val of Object.values(obj as Record<string, unknown>)) {
-        if (typeof val === 'string' && (val.includes('.vtt') || val.includes('.srt') || val.includes('subtitle'))) {
-          return val;
-        }
-        if (val && typeof val === 'object') {
-          const found = walk(val);
-          if (found) return found;
-        }
-      }
-      return null;
-    };
-    return walk(json);
-  } catch { return null; }
-}
-
-/**
- * Fallback: Try Dixon Omega API for movie streams.
- * Uses /api/movie/moviebox-universal with detailPath.
- */
-async function tryOmegaFallback(params: {
-  xcasperId: string;
-  detailPath: string;
-  type: string;
-  season: number;
-  episode: number;
-}): Promise<StreamObj[] | null> {
-  const { xcasperId, detailPath, type, season, episode } = params;
-  try {
-    let url: string;
-    if (type === 'tv' && detailPath) {
-      url = `${OMEGA_BASE}/moviebox-series-sources?id=${xcasperId}&season=${season}&episode=${episode}&path=${encodeURIComponent(detailPath)}`;
-    } else {
-      url = `${OMEGA_BASE}/moviebox-universal?id=${xcasperId}&type=${type}`;
-    }
-    console.log('[omega-fallback] Trying:', url);
+    const path = detailPath ? encodeURIComponent(detailPath) : '';
+    const url = `${OMEGA_BASE}/moviebox-series-sources?id=${xcasperId}&season=${season}&episode=${episode}&path=${path}`;
+    console.log('[omega] Trying:', url);
     const r = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -91,34 +129,28 @@ async function tryOmegaFallback(params: {
     });
     if (!r.ok) return null;
     const json = await r.json();
-    console.log('[omega-fallback] Response:', JSON.stringify(json).slice(0, 500));
 
-    // Extract stream URLs from Omega response
     const streams: StreamObj[] = [];
     const walk = (obj: unknown): void => {
       if (!obj || typeof obj !== 'object') return;
       const o = obj as Record<string, unknown>;
-      // Look for url/link fields that look like video streams
-      if (typeof o.url === 'string' && o.url.startsWith('http') && (o.url.includes('.mp4') || o.url.includes('stream') || o.url.includes('proxy'))) {
-        const q = String(o.quality || o.resolution || o.label || '480');
+      if (typeof o.url === 'string' && o.url.startsWith('http')) {
+        const q = String(o.quality || o.resolution || '480');
         streams.push({
           quality: q,
-          resolutions: q.replace('p', '').replace('P', ''),
+          resolutions: q.replace(/[^0-9]/g, ''),
           proxyUrl: o.url,
           downloadUrl: o.url,
         });
         return;
       }
-      if (Array.isArray(obj)) {
-        obj.forEach(walk);
-        return;
-      }
+      if (Array.isArray(obj)) { obj.forEach(walk); return; }
       Object.values(o).forEach(walk);
     };
     walk(json);
     return streams.length > 0 ? streams : null;
   } catch (e) {
-    console.warn('[omega-fallback] Error:', e);
+    console.warn('[omega] Error:', e);
     return null;
   }
 }
@@ -128,14 +160,15 @@ Deno.serve(async (req: Request) => {
 
   try {
     const body = await req.json().catch(() => ({}));
-    const xcasperId: string = String(body.id || '');
+    const xcasperId: string = String(body.id || body.subjectId || '');
+    const episodeSubjectId: string = String(body.episodeSubjectId || '');
     const type: string = body.type || 'movie';
     const season: number = Number(body.season) || 1;
     const episode: number = Number(body.episode) || 1;
     const title: string = body.title || '';
     const detailPath: string = body.detailPath || '';
 
-    console.log('[stream-proxy] Request:', { xcasperId, type, season, episode, title });
+    console.log('[stream-proxy] Request:', { xcasperId, episodeSubjectId, type, season, episode, title });
 
     if (!xcasperId) {
       return new Response(
@@ -144,23 +177,79 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // ── Build streams directly from XCASPER subjectId ─────────────────────────
-    // The bff/stream endpoint accepts the XCASPER subjectId directly and serves
-    // video bytes. These URLs work in <video src> without any additional proxy.
-    const streams = buildXcasperStreams(xcasperId);
-    console.log('[stream-proxy] ✅ Built', streams.length, 'stream URLs for subjectId:', xcasperId);
+    // ── MOVIE: call /api/play directly with show subjectId ────────────────────
+    if (type === 'movie') {
+      const playResult = await fetchPlayEndpoint(xcasperId);
+      if (playResult && playResult.streams.length > 0) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            streams: playResult.streams,
+            stream: playResult.streams.find(s => s.resolutions === '720') || playResult.streams[0],
+            subtitles: playResult.subtitles,
+            audioTracks: playResult.audioTracks,
+            xcasperId,
+          }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
 
-    // ── Fetch subtitle ────────────────────────────────────────────────────────
-    const subtitleUrl = await fetchSubtitle(xcasperId).catch(() => null);
+      // Fallback: build bff/stream URLs
+      const fallbackStreams = buildBffStreams(xcasperId);
+      return new Response(
+        JSON.stringify({ success: true, streams: fallbackStreams, stream: fallbackStreams[1] || fallbackStreams[0], subtitles: [], audioTracks: [] }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
 
-    // ── Return success with all quality options ───────────────────────────────
+    // ── TV EPISODE: use episode-level subjectId if provided ───────────────────
+    if (episodeSubjectId) {
+      const playResult = await fetchPlayEndpoint(episodeSubjectId);
+      if (playResult && playResult.streams.length > 0) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            streams: playResult.streams,
+            stream: playResult.streams.find(s => s.resolutions === '720') || playResult.streams[0],
+            subtitles: playResult.subtitles,
+            audioTracks: playResult.audioTracks,
+            xcasperId: episodeSubjectId,
+          }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+    }
+
+    // ── TV FALLBACK 1: bff/stream with season+episode params ─────────────────
+    const bffStreams = buildBffStreams(xcasperId, season, episode);
+
+    // ── TV FALLBACK 2: Omega series sources ───────────────────────────────────
+    const omegaStreams = await tryOmegaSeries(xcasperId, season, episode, detailPath);
+    if (omegaStreams && omegaStreams.length > 0) {
+      // Also get subtitles from show-level /api/play
+      const showPlay = await fetchPlayEndpoint(xcasperId);
+      return new Response(
+        JSON.stringify({
+          success: true,
+          streams: omegaStreams,
+          stream: omegaStreams[0],
+          subtitles: showPlay?.subtitles || [],
+          audioTracks: showPlay?.audioTracks || [],
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Get subtitles from show-level /api/play
+    const showPlay = await fetchPlayEndpoint(xcasperId);
+
     return new Response(
       JSON.stringify({
         success: true,
-        streams,
-        // Best single stream for backward compatibility
-        stream: streams.find(s => s.resolutions === '720') || streams[0],
-        subtitleUrl,
+        streams: bffStreams,
+        stream: bffStreams.find(s => s.resolutions === '720') || bffStreams[0],
+        subtitles: showPlay?.subtitles || [],
+        audioTracks: showPlay?.audioTracks || [],
         xcasperId,
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -169,14 +258,13 @@ Deno.serve(async (req: Request) => {
   } catch (e) {
     console.error('[stream-proxy] Fatal error:', e);
 
-    // Last resort: if we have xcasperId in body, still try to build streams
     try {
       const body = await req.clone().json().catch(() => ({}));
-      const xcasperId: string = String(body?.id || '');
+      const xcasperId: string = String(body?.id || body?.subjectId || '');
       if (xcasperId) {
-        const streams = buildXcasperStreams(xcasperId);
+        const fallbackStreams = buildBffStreams(xcasperId);
         return new Response(
-          JSON.stringify({ success: true, streams, stream: streams[1] || streams[0] }),
+          JSON.stringify({ success: true, streams: fallbackStreams, stream: fallbackStreams[1] || fallbackStreams[0] }),
           { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
         );
       }
