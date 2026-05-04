@@ -83,7 +83,7 @@ async function srtUrlToVttBlobUrl(srtUrl: string): Promise<string | null> {
 // ─── Call /api/play?subjectId=ID to get streams, subtitles, audio tracks ─────
 async function fetchPlayData(subjectId: string): Promise<PlayResult> {
   console.log('[play] Fetching /api/play?subjectId=', subjectId);
-  const res = await fetch(`${SB_BASE}/play?subjectId=${subjectId}`);
+  const res = await fetch(`${SB_BASE}/play/${subjectId}`);
   if (!res.ok) throw new Error(`/api/play returned ${res.status}`);
   const json = await res.json();
   console.log('[play] Response keys:', Object.keys(json.data || json || {}));
@@ -121,7 +121,7 @@ async function fetchPlayData(subjectId: string): Promise<PlayResult> {
 async function fetchShowEpisodes(showSubjectId: string, title: string): Promise<SeasonInfo[]> {
   // 1. Try rich-detail first (has episode-level subjectIds)
   try {
-    const res = await fetch(`${SB_BASE}/rich-detail?id=${showSubjectId}`);
+    const res = await fetch(`${SB_BASE}/rich-detail/${showSubjectId}`);
     if (res.ok) {
       const json = await res.json();
       const resource = json?.data?.resource || json?.resource;
@@ -208,49 +208,57 @@ async function fetchShowEpisodes(showSubjectId: string, title: string): Promise<
   return [];
 }
 
-// ─── Get streams for a TV episode ─────────────────────────────────────────────
-// Uses episode subjectId if available, falls back to bff/stream with season/episode params
+/// ─── Get streams for a TV episode ─────────────────────────────────────────────
 async function fetchEpisodeStreams(
   showSubjectId: string,
   episode: EpisodeInfo,
 ): Promise<PlayResult> {
-  // Case A: Episode has its own subjectId (from rich-detail)
+  
+  // Case A: Try using the specific Episode ID if it exists
   if (episode.subjectId) {
     try {
       const result = await fetchPlayData(episode.subjectId);
-      if (result.streams.length > 0) {
+      // Ensure result and streams exist before returning
+      if (result?.streams && result.streams.length > 0) {
         console.log('[episode-stream] ✅ Using episode subjectId:', episode.subjectId);
         return result;
       }
     } catch (e) {
-      console.warn('[episode-stream] Episode subjectId fetch failed, trying fallbacks:', e);
+      console.warn('[episode-stream] Episode subjectId fetch failed:', e);
     }
   }
 
-  // Case B: No episode subjectId — build bff/stream URLs with season/episode params
-  // This is the correct format: /api/bff/stream?subjectId=SHOW_ID&season=S&episode=E&resolution=720
-  console.log('[episode-stream] Using bff/stream with show subjectId + season/episode params');
+  // Case B: Fallback - Manual Construction (The fix for "Stream Unavailable")
+  // This builds the stream URL using the Show ID + Season + Episode numbers
+  console.log('[episode-stream] Building stream from showId + S/E params');
+  
   const resolutions = ['1080', '720', '480', '360'];
   const streams: StreamQuality[] = resolutions.map(res => ({
+    // Use the base URL and append the required query parameters
     proxyUrl: `${SB_BASE}/bff/stream?subjectId=${showSubjectId}&season=${episode.seasonNum}&episode=${episode.episodeNum}&resolution=${res}`,
     resolutions: res,
-    quality: res,
+    // Fix quality string to include 'p' so the UI displays it correctly
+    quality: res === '1080' || res === '720' ? `${res}p HD` : `${res}p`,
   }));
 
-  // Also try fetching subtitles from the show-level play endpoint
+  // Attempt to get subtitles from the main show data
   let subtitles: SubtitleTrack[] = [];
   let audioTracks: AudioTrack[] = [];
+  
   try {
     const showPlay = await fetchPlayData(showSubjectId);
-    subtitles = showPlay.subtitles;
-    audioTracks = showPlay.audioTracks;
-  } catch {
-    // ignore
+    subtitles = showPlay?.subtitles || [];
+    audioTracks = showPlay?.audioTracks || [];
+  } catch (err) {
+    console.warn('[episode-stream] Could not fetch show-level assets');
   }
 
-  return { streams, subtitles, audioTracks };
+  return { 
+    streams, 
+    subtitles, 
+    audioTracks 
+  };
 }
-
 // ─── Mid-stream ad overlay ────────────────────────────────────────────────────
 function StreamAdOverlay({ onClose }: { onClose: () => void }) {
   const [seconds, setSeconds] = useState(15);
