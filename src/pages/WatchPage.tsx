@@ -106,11 +106,15 @@ async function fetchPlayData(params: {
   if (error) throw new Error(error.message || 'stream-proxy failed');
   if (!data) throw new Error('No stream payload from stream-proxy');
 
-  const rawStreams: StreamQuality[] = (Array.isArray(data.streams) ? data.streams : []).map((s: Record<string, unknown>) => ({
-    proxyUrl: String(s.proxyUrl || s.url || ''),
-    resolutions: String(s.resolutions || s.resolution || ''),
-    quality: String(s.resolutions || s.resolution || ''),
-    url: String(s.url || ''),
+  const streamCandidates = Array.isArray(data.streams)
+    ? data.streams
+    : (data.stream && typeof data.stream === 'object' ? [data.stream] : []);
+
+  const rawStreams: StreamQuality[] = streamCandidates.map((s: Record<string, unknown>) => ({
+    proxyUrl: String(s.proxyUrl || s.url || s.file || ''),
+    resolutions: String(s.resolutions || s.resolution || s.quality || ''),
+    quality: String(s.resolutions || s.resolution || s.quality || ''),
+    url: String(s.url || s.file || ''),
     size: s.size ? String(s.size) : undefined,
     duration: s.duration ? Number(s.duration) : undefined,
   })).filter((s: StreamQuality) => s.proxyUrl);
