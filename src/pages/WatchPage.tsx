@@ -507,6 +507,7 @@ function SourceTabs({
   const sources: { key: EmbedSource; label: string; badge?: string }[] = isAnime
     ? [
         { key: 'anime2', label: '2Anime', badge: 'ANIME' },
+        { key: 'xcasper', label: 'XCASPER', badge: 'API' },
         { key: 'multiembed', label: 'MultiEmbed', badge: 'BACKUP' },
         { key: 'vidsrc', label: 'VidSrc', badge: 'BACKUP' },
       ]
@@ -561,6 +562,7 @@ export default function WatchPage() {
   const movieCover   = searchParams.get('cover') || '';
   const tmdbId       = searchParams.get('tmdbId') || '';
   const anilistId    = searchParams.get('anilistId') || '';
+  const detailPath   = decodeURIComponent(searchParams.get('detailPath') || '');
   const isAnime      = searchParams.get('isAnime') === '1';
   const isTVShow     = subjectType === '2';
 
@@ -593,7 +595,8 @@ export default function WatchPage() {
   const adTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Derived TMDB id (from URL param or fallback)
-  const effectiveTmdbId = tmdbId || id || '';
+  const parsedTmdbFromDetailPath = detailPath.match(/(?:tmdb(?:_?id)?[=\/:-]|\b)(\d{4,})/i)?.[1] || '';
+  const effectiveTmdbId = tmdbId || parsedTmdbFromDetailPath || id || '';
   const effectiveAnilistId = anilistId || id || '';
 
   // ─── Build embed URL ───────────────────────────────────────────────────────

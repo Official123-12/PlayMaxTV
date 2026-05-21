@@ -43,7 +43,8 @@ export default function MovieCard({ movie, size = 'md' }: MovieCardProps) {
     : `https://placehold.co/300x450/1a1a1a/444?text=${encodeURIComponent(movie.title.slice(0, 12))}`;
 
   const detailUrl = `/movie/${movie.subjectId}?type=${movie.subjectType}&title=${encodeURIComponent(movie.title)}&detailPath=${encodeURIComponent(movie.detailPath || '')}`;
-  const watchUrl = `/watch/${movie.subjectId}?type=${movie.subjectType}&title=${encodeURIComponent(movie.title)}&cover=${encodeURIComponent(movie.cover?.url || '')}&detailPath=${encodeURIComponent(movie.detailPath || '')}&tmdbId=${movie.subjectId}`;
+  const tmdbFromDetail = (movie.detailPath || '').match(/(?:tmdb(?:_?id)?[=\/:-]|\b)(\d{4,})/i)?.[1] || '';
+  const watchUrl = `/watch/${movie.subjectId}?type=${movie.subjectType}&title=${encodeURIComponent(movie.title)}&cover=${encodeURIComponent(movie.cover?.url || '')}&detailPath=${encodeURIComponent(movie.detailPath || '')}&tmdbId=${tmdbFromDetail || movie.subjectId}`;
 
   return (
     <div
