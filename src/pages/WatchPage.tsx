@@ -14,7 +14,7 @@ import type { Review } from '@/lib/db';
 import {
   Star, Plus, Check, Download, Share2, Crown, Loader, ArrowLeft,
   Tv, ChevronDown, Play, Timer, MessageSquare, Trash2, Lock, RefreshCw,
-  SkipForward, Volume2, ChevronRight,
+  SkipForward, Volume2, ChevronRight, Shield, AlertTriangle,
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { toast } from 'sonner';
@@ -22,10 +22,13 @@ import { toast } from 'sonner';
 // ─── API constants ────────────────────────────────────────────────────────────
 const SB_BASE = 'https://movieapi.xcasper.space/api';
 
+// ─── Embed source types ───────────────────────────────────────────────────────
+type EmbedSource = 'xcasper' | 'multiembed' | 'vidsrc' | 'anime2';
+
 // ─── Episode (with own subjectId for /api/play) ────────────────────────────
 interface EpisodeInfo {
-  subjectId: string;       // XCASPER episode-level subject ID — use for /api/play
-  showboxEpisodeId?: string; // ShowBox numeric ID (fallback)
+  subjectId: string;
+  showboxEpisodeId?: string;
   episodeNum: number;
   seasonNum: number;
   name: string;
@@ -51,24 +54,23 @@ interface PlayResult {
 interface SubtitleTrack {
   language: string;
   languageCode: string;
-  url: string; // .srt URL
+  url: string;
 }
 
 interface AudioTrack {
   language: string;
   languageCode: string;
   isOriginal: boolean;
-  subjectId: string; // different subjectId per dub/sub version
+  subjectId: string;
   detailPath?: string;
 }
 
-// ─── Convert SRT URL → VTT blob URL (for <track> element) ────────────────────
+// ─── Convert SRT URL → VTT blob URL ──────────────────────────────────────────
 async function srtUrlToVttBlobUrl(srtUrl: string): Promise<string | null> {
   try {
     const res = await fetch(srtUrl);
     if (!res.ok) return null;
     const srt = await res.text();
-    // Convert SRT to VTT
     const vtt = 'WEBVTT\n\n' + srt
       .replace(/\r\n/g, '\n')
       .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2')
@@ -80,17 +82,13 @@ async function srtUrlToVttBlobUrl(srtUrl: string): Promise<string | null> {
   }
 }
 
-// ─── Call /api/play?subjectId=ID to get streams, subtitles, audio tracks ─────
+// ─── Call /api/play ───────────────────────────────────────────────────────────
 async function fetchPlayData(subjectId: string): Promise<PlayResult> {
-  console.log('[play] Fetching /api/play?subjectId=', subjectId);
   const res = await fetch(`${SB_BASE}/play?subjectId=${subjectId}`);
   if (!res.ok) throw new Error(`/api/play returned ${res.status}`);
   const json = await res.json();
-  console.log('[play] Response keys:', Object.keys(json.data || json || {}));
-
   const data = json.data || json;
 
-  // Extract streams — prefer proxyUrl
   const rawStreams: StreamQuality[] = (data.streams || []).map((s: Record<string, unknown>) => ({
     proxyUrl: String(s.proxyUrl || s.url || ''),
     resolutions: String(s.resolutions || s.resolution || ''),
@@ -117,11 +115,10 @@ async function fetchPlayData(subjectId: string): Promise<PlayResult> {
   return { streams: rawStreams, subtitles, audioTracks };
 }
 
-// ─── Fetch show's season/episode list (rich-detail gives episode subjectIds) ──
+// ─── Fetch show episodes ──────────────────────────────────────────────────────
 async function fetchShowEpisodes(showSubjectId: string, title: string): Promise<SeasonInfo[]> {
-  // 1. Try rich-detail first (has episode-level subjectIds)
   try {
-    const res = await fetch(`${SB_BASE}/rich-detail/${showSubjectId}`);
+    const res = await fetch(`${SB_BASE}/rich-detail?id=${showSubjectId}`);
     if (res.ok) {
       const json = await res.json();
       const resource = json?.data?.resource || json?.resource;
@@ -139,20 +136,14 @@ async function fetchShowEpisodes(showSubjectId: string, title: string): Promise<
             duration: ep.duration ? Number(ep.duration) : undefined,
           })).filter((ep: EpisodeInfo) => ep.subjectId && ep.episodeNum > 0),
         })).filter((s: SeasonInfo) => s.episodes.length > 0);
-
-        if (seasons.length > 0) {
-          console.log('[episodes] Got from rich-detail:', seasons.length, 'seasons');
-          return seasons;
-        }
+        if (seasons.length > 0) return seasons;
       }
     }
   } catch (e) {
     console.warn('[episodes] rich-detail failed:', e);
   }
 
-  // 2. Fallback: ShowBox TV endpoint (doesn't have episode subjectIds, so we build stream URLs differently)
   try {
-    // Search for ShowBox ID
     const searchRes = await fetch(`${SB_BASE}/showbox/search?keyword=${encodeURIComponent(title)}&type=tv`);
     const searchJson = await searchRes.json();
     const items: Record<string, unknown>[] = searchJson.data || [];
@@ -167,22 +158,19 @@ async function fetchShowEpisodes(showSubjectId: string, title: string): Promise<
       const tvJson = await tvRes.json();
       const data = tvJson.data || {};
       const episodeList: Record<string, unknown>[] = data.episode || data.episodes || [];
-
       if (!Array.isArray(episodeList) || episodeList.length === 0) return [];
 
-      // Group by season — note: no episode-level subjectId available here
-      // We'll use showSubjectId+season+episode as a fake subjectId key for now
       const seasonMap = new Map<number, EpisodeInfo[]>();
       for (const ep of episodeList) {
         const s = Number(ep.season || 1);
         const epObj: EpisodeInfo = {
-          subjectId: '', // Will be fetched via bff/stream approach
+          subjectId: '',
           showboxEpisodeId: String(ep.id || ''),
           episodeNum: Number(ep.episode || 0),
           seasonNum: s,
           name: String(ep.title || `Episode ${ep.episode}`),
           synopsis: ep.synopsis ? String(ep.synopsis) : undefined,
-          cover: ep.thumbs ? String(ep.thumbs) : ep.thumbs_org ? String(ep.thumbs_org) : undefined,
+          cover: ep.thumbs ? String(ep.thumbs) : undefined,
           airDate: ep.released ? String(ep.released) : undefined,
           duration: Number(ep.runtime || 0),
           imdbRating: ep.imdb_rating ? String(ep.imdb_rating) : undefined,
@@ -191,108 +179,89 @@ async function fetchShowEpisodes(showSubjectId: string, title: string): Promise<
         seasonMap.get(s)!.push(epObj);
       }
 
-      const seasons: SeasonInfo[] = Array.from(seasonMap.entries())
+      return Array.from(seasonMap.entries())
         .sort(([a], [b]) => a - b)
         .map(([s, eps]) => ({
           seasonNum: s,
           episodes: eps.sort((a, b) => a.episodeNum - b.episodeNum),
         }));
-
-      console.log('[episodes] Got from ShowBox TV:', seasons.length, 'seasons (no episode subjectIds)');
-      return seasons;
     }
   } catch (e) {
-    console.warn('[episodes] ShowBox fallback failed:', e);
+    console.warn('[episodes] showbox fallback failed:', e);
   }
 
   return [];
 }
 
-/// ─── Get streams for a TV episode ─────────────────────────────────────────────
-async function fetchEpisodeStreams(
-  showSubjectId: string,
-  episode: EpisodeInfo,
-): Promise<PlayResult> {
-  
-  // Case A: Try using the specific Episode ID if it exists
+// ─── Fetch episode streams ────────────────────────────────────────────────────
+async function fetchEpisodeStreams(showSubjectId: string, episode: EpisodeInfo): Promise<PlayResult> {
+  const resolutions = ['1080', '720', '480', '360'];
+
   if (episode.subjectId) {
     try {
       const result = await fetchPlayData(episode.subjectId);
-      // Ensure result and streams exist before returning
-      if (result?.streams && result.streams.length > 0) {
-        console.log('[episode-stream] ✅ Using episode subjectId:', episode.subjectId);
-        return result;
-      }
+      if (result.streams.length > 0) return result;
     } catch (e) {
       console.warn('[episode-stream] Episode subjectId fetch failed:', e);
     }
   }
 
-  // Case B: Fallback - Manual Construction (The fix for "Stream Unavailable")
-  // This builds the stream URL using the Show ID + Season + Episode numbers
-  console.log('[episode-stream] Building stream from showId + S/E params');
-  
-  const resolutions = ['1080', '720', '480', '360'];
   const streams: StreamQuality[] = resolutions.map(res => ({
-    // Use episode's own subjectId if available, otherwise fall back to showId+season+episode
-    proxyUrl: episode.subjectId
-      ? `${SB_BASE}/bff/stream?subjectId=${episode.subjectId}&resolution=${res}`
-      : `${SB_BASE}/bff/stream?subjectId=${showSubjectId}&season=${episode.seasonNum}&episode=${episode.episodeNum}&resolution=${res}`,
+    proxyUrl: `${SB_BASE}/bff/stream?subjectId=${showSubjectId}&season=${episode.seasonNum}&episode=${episode.episodeNum}&resolution=${res}`,
     resolutions: res,
     quality: res,
   }));
 
-  // Attempt to get subtitles from the main show data
-  let subtitles: SubtitleTrack[] = [];
-  let audioTracks: AudioTrack[] = [];
-  
-  try {
-    const showPlay = await fetchPlayData(showSubjectId);
-    subtitles = showPlay?.subtitles || [];
-    audioTracks = showPlay?.audioTracks || [];
-  } catch (err) {
-    console.warn('[episode-stream] Could not fetch show-level assets');
-  }
-
-  return { 
-    streams, 
-    subtitles, 
-    audioTracks 
-  };
+  return { streams, subtitles: [], audioTracks: [] };
 }
+
+// ─── Ad Blocker Banner ────────────────────────────────────────────────────────
+function AdBlockerBanner({ onDismiss }: { onDismiss: () => void }) {
+  return (
+    <div className="bg-gradient-to-r from-yellow-950/80 to-orange-950/60 border border-yellow-700/40 rounded-xl px-4 py-3 flex items-center gap-3">
+      <div className="w-8 h-8 rounded-lg bg-yellow-500/20 border border-yellow-600/40 flex items-center justify-center flex-shrink-0">
+        <Shield size={14} className="text-yellow-400" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-yellow-300 text-xs font-black">Enable Ad Blocker for best experience</p>
+        <p className="text-yellow-600 text-[11px] mt-0.5">
+          Install <a href="https://ublockorigin.com" target="_blank" rel="noreferrer" className="underline hover:text-yellow-400">uBlock Origin</a> or use Brave browser to block ads on embed players.
+        </p>
+      </div>
+      <button onClick={onDismiss} className="text-yellow-700 hover:text-yellow-400 transition-colors text-lg leading-none flex-shrink-0">×</button>
+    </div>
+  );
+}
+
 // ─── Mid-stream ad overlay ────────────────────────────────────────────────────
 function StreamAdOverlay({ onClose }: { onClose: () => void }) {
   const [seconds, setSeconds] = useState(15);
-  const [canClose, setCanClose] = useState(false);
   useEffect(() => {
-    const t = setInterval(() => {
-      setSeconds(p => { if (p <= 1) { clearInterval(t); setCanClose(true); return 0; } return p - 1; });
-    }, 1000);
+    const t = setInterval(() => setSeconds(s => s - 1), 1000);
     return () => clearInterval(t);
   }, []);
   return (
-    <div className="absolute inset-0 bg-black/95 z-30 flex items-center justify-center rounded-2xl">
-      <div className="text-center px-6 py-8 max-w-sm">
-        <div className="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-[#e50914] to-red-800 flex items-center justify-center mb-4">
-          <Crown size={26} className="text-[#f5c518]" />
-        </div>
-        <p className="text-white font-black text-lg mb-1">PlayMax TV</p>
-        <p className="text-gray-400 text-sm mb-6">Your streaming destination · Advertisement</p>
-        <div className="bg-gray-900 rounded-xl p-3 mb-5 flex items-center justify-between">
-          <span className="text-gray-500 text-xs">Go Premium to remove ads</span>
-          <span className="flex items-center gap-1.5 text-gray-400 text-xs"><Timer size={11} /> {seconds}s</span>
-        </div>
-        <Link to="/premium" className="block w-full bg-[#e50914] text-white font-black py-2.5 rounded-xl text-sm mb-3 hover:bg-red-700 transition-colors">
-          Get PlayMax+ · Remove Ads
-        </Link>
-        <button
-          onClick={canClose ? onClose : undefined}
-          disabled={!canClose}
-          className={`text-sm transition-colors ${canClose ? 'text-gray-400 hover:text-white cursor-pointer' : 'text-gray-700 cursor-not-allowed'}`}
-        >
-          {canClose ? 'Continue watching →' : `Skip in ${seconds}s`}
-        </button>
+    <div className="absolute inset-0 z-50 bg-black/95 flex flex-col items-center justify-center rounded-2xl">
+      <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-[#e50914] to-red-800 flex items-center justify-center mb-4 shadow-2xl">
+        <Crown size={28} className="text-white" />
       </div>
+      <h2 className="text-white font-black text-xl mb-1">Premium Ad Break</h2>
+      <p className="text-gray-400 text-sm mb-6">Your streaming destination · Advertisement</p>
+      {seconds > 0 ? (
+        <div className="flex items-center gap-2 bg-gray-900 border border-gray-800 px-4 py-2 rounded-xl mb-4">
+          <Timer size={14} className="text-gray-500" />
+          <span className="text-gray-400 text-sm font-semibold">Skip in {seconds}s</span>
+        </div>
+      ) : (
+        <button onClick={onClose}
+          className="bg-[#e50914] text-white font-black px-6 py-2.5 rounded-xl mb-4 hover:bg-red-700 transition-colors">
+          Continue Watching
+        </button>
+      )}
+      <Link to="/premium"
+        className="flex items-center gap-2 text-[#f5c518] text-xs font-semibold hover:text-yellow-300 transition-colors">
+        <Crown size={13} /> Upgrade to skip all ads
+      </Link>
     </div>
   );
 }
@@ -301,132 +270,152 @@ function StreamAdOverlay({ onClose }: { onClose: () => void }) {
 function AuthGate({ title }: { title: string }) {
   return (
     <div className="min-h-screen bg-[#0d0d0d] flex items-center justify-center px-4">
-      <div className="text-center max-w-sm">
-        <div className="w-20 h-20 mx-auto rounded-3xl bg-[#141414] border border-gray-800 flex items-center justify-center mb-5">
-          <Lock size={36} className="text-[#e50914]" />
+      <div className="max-w-md w-full text-center">
+        <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-[#e50914] to-red-900 flex items-center justify-center mx-auto mb-6 shadow-2xl shadow-red-900/40">
+          <Lock size={32} className="text-white" />
         </div>
-        <h1 className="text-white text-2xl font-black mb-2">Sign In to Watch</h1>
-        <p className="text-gray-500 text-sm mb-2 leading-relaxed">
-          Create a free account to stream <span className="text-white font-semibold">"{title}"</span> and thousands of other movies &amp; shows.
+        <h2 className="text-white font-black text-2xl mb-2">Sign in to Watch</h2>
+        <p className="text-gray-500 text-sm mb-8 leading-relaxed">
+          Create a free account to stream <span className="text-white font-semibold">"{title}"</span> and thousands of other movies & shows.
         </p>
-        <p className="text-gray-700 text-xs mb-6">Completely free — no credit card required.</p>
-        <div className="flex gap-3">
-          <Link to="/register" className="flex-1 bg-[#e50914] text-white font-black py-3 rounded-2xl text-sm hover:bg-red-700 transition-colors shadow-lg shadow-red-900/30">Join Free</Link>
-          <Link to="/login" className="flex-1 border border-gray-700 text-gray-300 font-bold py-3 rounded-2xl text-sm hover:border-gray-500 hover:text-white transition-colors">Sign In</Link>
+        <div className="flex flex-col sm:flex-row gap-3 justify-center">
+          <Link to="/register" className="bg-[#e50914] text-white font-black px-8 py-3.5 rounded-xl hover:bg-red-700 transition-all shadow-lg shadow-red-900/30">
+            Create Free Account
+          </Link>
+          <Link to="/login" className="border border-gray-700 text-gray-300 font-semibold px-8 py-3.5 rounded-xl hover:border-gray-500 hover:text-white transition-all">
+            Sign In
+          </Link>
         </div>
       </div>
     </div>
   );
 }
 
-// ─── Ratings & Reviews ────────────────────────────────────────────────────────
+// ─── Ratings Section ──────────────────────────────────────────────────────────
 function RatingsSection({ subjectId, subjectTitle }: { subjectId: string; subjectTitle: string }) {
   const { session } = useAuth();
-  const [reviews, setReviews] = useState<Review[]>([]);
-  const [avgData, setAvgData] = useState({ avg: 0, count: 0 });
+  const [showForm, setShowForm] = useState(false);
   const [userRating, setUserRating] = useState(0);
   const [hoverRating, setHoverRating] = useState(0);
   const [reviewText, setReviewText] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [showForm, setShowForm] = useState(false);
+
+  const { data: reviews = [], refetch: refetchReviews } = useQuery<Review[]>({
+    queryKey: ['reviews', subjectId],
+    queryFn: () => fetchReviews(subjectId),
+    staleTime: 2 * 60 * 1000,
+  });
+
+  const { data: avgRating } = useQuery<number>({
+    queryKey: ['avg-rating', subjectId],
+    queryFn: () => fetchAvgRating(subjectId),
+    staleTime: 2 * 60 * 1000,
+  });
+
+  const myReview = session?.user?.id
+    ? reviews.find(r => r.userId === session.user.id)
+    : null;
 
   useEffect(() => {
-    fetchReviews(subjectId).then(setReviews);
-    fetchAvgRating(subjectId).then(setAvgData);
-  }, [subjectId]);
-
-  useEffect(() => {
-    if (session?.user?.id) {
-      const mine = reviews.find(r => r.userId === session.user.id);
-      if (mine) { setUserRating(mine.rating); setReviewText(mine.reviewText); }
+    if (myReview) {
+      setUserRating(myReview.rating);
+      setReviewText(myReview.reviewText || '');
     }
-  }, [reviews, session?.user?.id]);
-
-  const StarSVG = ({ filled }: { filled: boolean }) => (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill={filled ? '#f5c518' : 'none'}>
-      <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"
-        stroke="#f5c518" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-
-  const myReview = reviews.find(r => r.userId === session?.user?.id);
+  }, [myReview]);
 
   const handleSubmit = async () => {
-    if (!session) { toast.error('Sign in to leave a review'); return; }
-    if (userRating === 0) { toast.error('Select a star rating'); return; }
+    if (!session?.user?.id || userRating === 0) return;
     setSubmitting(true);
     try {
-      await upsertReview(session.user.id, { subjectId, subjectTitle, rating: userRating, reviewText });
-      const [updated, avg] = await Promise.all([fetchReviews(subjectId), fetchAvgRating(subjectId)]);
-      setReviews(updated); setAvgData(avg);
-      toast.success('Review submitted!'); setShowForm(false);
-    } catch { toast.error('Failed to submit review'); }
-    finally { setSubmitting(false); }
+      const userName = session.user.email?.split('@')[0] || 'User';
+      await upsertReview({
+        subjectId, userId: session.user.id, userName,
+        rating: userRating, reviewText: reviewText.trim(),
+      });
+      await refetchReviews();
+      setShowForm(false);
+      toast.success('Review submitted!');
+    } catch {
+      toast.error('Failed to submit review');
+    }
+    setSubmitting(false);
   };
 
   const handleDelete = async () => {
-    if (!session) return;
-    await deleteReview(session.user.id, subjectId);
-    const [updated, avg] = await Promise.all([fetchReviews(subjectId), fetchAvgRating(subjectId)]);
-    setReviews(updated); setAvgData(avg); setUserRating(0); setReviewText('');
-    toast.success('Review deleted');
+    if (!session?.user?.id) return;
+    try {
+      await deleteReview(subjectId, session.user.id);
+      await refetchReviews();
+      setUserRating(0);
+      setReviewText('');
+      toast.success('Review deleted');
+    } catch {
+      toast.error('Failed to delete review');
+    }
   };
+
+  const StarSVG = ({ filled }: { filled: boolean }) => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill={filled ? '#f5c518' : 'none'} stroke={filled ? '#f5c518' : '#4b5563'} strokeWidth="1.5">
+      <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+    </svg>
+  );
 
   return (
     <div className="bg-[#141414] rounded-2xl p-5 border border-gray-800/40">
-      <div className="flex items-center justify-between mb-5">
+      <div className="flex items-center justify-between mb-4">
         <h2 className="text-white font-black text-base flex items-center gap-2">
           <MessageSquare size={16} className="text-[#e50914]" /> Ratings & Reviews
         </h2>
-        {avgData.count > 0 && (
-          <div className="flex items-center gap-2">
-            <div className="flex">{[1,2,3,4,5].map(s => <StarSVG key={s} filled={s <= Math.round(avgData.avg)} />)}</div>
-            <span className="text-[#f5c518] font-black text-sm">{avgData.avg}</span>
-            <span className="text-gray-600 text-xs">({avgData.count})</span>
+        {avgRating !== undefined && avgRating > 0 && (
+          <div className="flex items-center gap-1.5 bg-[#f5c518]/10 border border-[#f5c518]/30 rounded-xl px-3 py-1.5">
+            <Star size={13} fill="#f5c518" className="text-[#f5c518]" />
+            <span className="text-[#f5c518] font-black text-sm">{avgRating.toFixed(1)}</span>
+            <span className="text-[#f5c518]/50 text-xs">({reviews.length})</span>
           </div>
         )}
       </div>
-
-      {session && !showForm && (
-        <button onClick={() => setShowForm(true)}
-          className="flex items-center gap-2 text-sm text-gray-400 hover:text-white border border-gray-700 hover:border-gray-500 px-4 py-2.5 rounded-xl transition-all mb-5 font-semibold">
-          <Star size={14} className="text-[#f5c518]" /> {myReview ? 'Edit your review' : 'Write a review'}
-        </button>
-      )}
-
-      {showForm && session && (
-        <div className="bg-[#1a1a1a] rounded-xl p-4 border border-gray-700/40 mb-5">
-          <p className="text-white font-bold text-sm mb-3">Your Rating</p>
-          <div className="flex gap-1 mb-3">
-            {[1,2,3,4,5].map(s => (
-              <button key={s} onMouseEnter={() => setHoverRating(s)} onMouseLeave={() => setHoverRating(0)} onClick={() => setUserRating(s)} className="transition-transform hover:scale-110">
-                <svg width="28" height="28" viewBox="0 0 24 24" fill={(hoverRating || userRating) >= s ? '#f5c518' : 'none'}>
-                  <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" stroke="#f5c518" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-            ))}
-            <span className="text-[#f5c518] text-sm font-black ml-2 self-center">
-              {['','Poor','Fair','Good','Great','Excellent'][hoverRating || userRating] || ''}
-            </span>
-          </div>
-          <textarea value={reviewText} onChange={e => setReviewText(e.target.value)} placeholder="Share your thoughts (optional)..." rows={3}
-            className="w-full bg-[#111] border border-gray-700/60 text-white text-sm px-3 py-2.5 rounded-xl focus:outline-none focus:border-[#e50914] resize-none placeholder:text-gray-700" />
-          <div className="flex gap-2 mt-3">
-            <button onClick={handleSubmit} disabled={submitting || userRating === 0}
-              className="flex-1 bg-[#e50914] text-white font-black py-2.5 rounded-xl text-sm hover:bg-red-700 disabled:opacity-40 transition-colors">
-              {submitting ? 'Submitting...' : 'Submit Review'}
+      {session ? (
+        <div className="mb-5">
+          {!showForm ? (
+            <button onClick={() => setShowForm(true)}
+              className="text-sm font-semibold text-[#e50914] hover:text-red-400 flex items-center gap-1.5 transition-colors">
+              <Star size={14} /> {myReview ? 'Edit your review' : 'Rate this title'}
             </button>
-            {myReview && (
-              <button onClick={handleDelete} className="px-4 py-2.5 rounded-xl border border-red-900/50 text-red-500 hover:bg-red-950/30 transition-colors text-sm">
-                <Trash2 size={14} />
-              </button>
-            )}
-            <button onClick={() => setShowForm(false)} className="px-4 py-2.5 rounded-xl border border-gray-700 text-gray-500 hover:text-white transition-colors text-sm">
-              Cancel
-            </button>
-          </div>
+          ) : (
+            <div className="bg-[#1a1a1a] rounded-xl p-4 border border-gray-700/40">
+              <p className="text-gray-400 text-xs font-semibold mb-2">Your Rating</p>
+              <div className="flex gap-1 mb-3">
+                {[1, 2, 3, 4, 5].map(s => (
+                  <button key={s} onClick={() => setUserRating(s)}
+                    onMouseEnter={() => setHoverRating(s)}
+                    onMouseLeave={() => setHoverRating(0)}>
+                    <StarSVG filled={s <= (hoverRating || userRating)} />
+                  </button>
+                ))}
+                <span className="text-gray-600 text-xs ml-2 self-center">
+                  {['', 'Poor', 'Fair', 'Good', 'Great', 'Excellent'][hoverRating || userRating] || ''}
+                </span>
+              </div>
+              <textarea value={reviewText} onChange={e => setReviewText(e.target.value)} placeholder="Share your thoughts (optional)..." rows={3}
+                className="w-full bg-[#111] border border-gray-700/60 text-white text-sm px-3 py-2.5 rounded-xl focus:outline-none focus:border-[#e50914] resize-none placeholder:text-gray-700" />
+              <div className="flex gap-2 mt-3">
+                <button onClick={handleSubmit} disabled={submitting || userRating === 0}
+                  className="flex-1 bg-[#e50914] text-white font-black py-2.5 rounded-xl text-sm hover:bg-red-700 disabled:opacity-40 transition-colors">
+                  {submitting ? 'Submitting...' : 'Submit Review'}
+                </button>
+                {myReview && (
+                  <button onClick={handleDelete} className="px-4 py-2.5 rounded-xl border border-red-900/50 text-red-500 hover:bg-red-950/30 transition-colors text-sm">
+                    <Trash2 size={14} />
+                  </button>
+                )}
+                <button onClick={() => setShowForm(false)} className="px-4 py-2.5 rounded-xl border border-gray-700 text-gray-500 hover:text-white transition-colors text-sm">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
         </div>
-      )}
+      ) : null}
 
       {reviews.length === 0 ? (
         <p className="text-gray-700 text-sm italic">No reviews yet. Be the first!</p>
@@ -441,7 +430,7 @@ function RatingsSection({ subjectId, subjectTitle }: { subjectId: string; subjec
                   </div>
                   <span className="text-white text-sm font-semibold">{review.userName}</span>
                 </div>
-                <div className="flex">{[1,2,3,4,5].map(s => <StarSVG key={s} filled={s <= review.rating} />)}</div>
+                <div className="flex">{[1, 2, 3, 4, 5].map(s => <StarSVG key={s} filled={s <= review.rating} />)}</div>
               </div>
               {review.reviewText && <p className="text-gray-400 text-sm leading-relaxed ml-9">{review.reviewText}</p>}
               <p className="text-gray-700 text-xs ml-9 mt-1">{new Date(review.createdAt).toLocaleDateString()}</p>
@@ -453,6 +442,86 @@ function RatingsSection({ subjectId, subjectTitle }: { subjectId: string; subjec
   );
 }
 
+// ─── Embed Player (iframe-based) ──────────────────────────────────────────────
+function EmbedPlayer({ src, title }: { src: string; title: string }) {
+  const [loaded, setLoaded] = useState(false);
+  return (
+    <div className="relative w-full aspect-video bg-black rounded-2xl overflow-hidden">
+      {!loaded && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gradient-to-br from-gray-900 to-[#111]">
+          <Loader size={32} className="text-[#e50914] animate-spin" />
+          <p className="text-gray-500 text-sm">Loading player…</p>
+        </div>
+      )}
+      <iframe
+        key={src}
+        src={src}
+        title={title}
+        allowFullScreen
+        allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+        referrerPolicy="origin"
+        onLoad={() => setLoaded(true)}
+        className="w-full h-full border-0"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-presentation allow-top-navigation-by-user-activation"
+      />
+    </div>
+  );
+}
+
+// ─── Source Switcher Tabs ─────────────────────────────────────────────────────
+function SourceTabs({
+  active, onChange, isAnime, isTVShow,
+}: {
+  active: EmbedSource;
+  onChange: (s: EmbedSource) => void;
+  isAnime: boolean;
+  isTVShow: boolean;
+}) {
+  const sources: { key: EmbedSource; label: string; badge?: string }[] = isAnime
+    ? [
+        { key: 'anime2', label: '2Anime', badge: 'ANIME' },
+        { key: 'multiembed', label: 'MultiEmbed', badge: 'BACKUP' },
+        { key: 'vidsrc', label: 'VidSrc', badge: 'BACKUP' },
+      ]
+    : isTVShow
+    ? [
+        { key: 'xcasper', label: 'Server 1' },
+        { key: 'multiembed', label: 'Server 2' },
+        { key: 'vidsrc', label: 'Server 3' },
+      ]
+    : [
+        { key: 'xcasper', label: 'Server 1' },
+        { key: 'multiembed', label: 'Server 2' },
+        { key: 'vidsrc', label: 'Server 3' },
+      ];
+
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <span className="text-gray-600 text-xs font-semibold uppercase tracking-wider">Source:</span>
+      {sources.map(s => (
+        <button
+          key={s.key}
+          onClick={() => onChange(s.key)}
+          className={`flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg transition-all border ${
+            active === s.key
+              ? 'bg-[#e50914] border-[#e50914] text-white shadow-lg shadow-red-900/30'
+              : 'bg-[#1a1a1a] border-gray-700 text-gray-400 hover:text-white hover:border-gray-500'
+          }`}
+        >
+          {s.label}
+          {s.badge && (
+            <span className={`text-[9px] px-1 py-0.5 rounded font-black ${
+              s.badge === 'ANIME' ? 'bg-pink-600/30 text-pink-400' : 'bg-gray-700 text-gray-500'
+            }`}>
+              {s.badge}
+            </span>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // ─── Main WatchPage ───────────────────────────────────────────────────────────
 export default function WatchPage() {
   const { id } = useParams<{ id: string }>();
@@ -460,33 +529,62 @@ export default function WatchPage() {
   const navigate = useNavigate();
   const { session, profile, loading: authLoading } = useAuth();
 
-  const subjectType = searchParams.get('type') || '1';
-  const movieTitle  = searchParams.get('title') || 'Unknown Title';
-  const movieCover  = searchParams.get('cover') || '';
-  const isTVShow    = subjectType === '2';
+  const subjectType  = searchParams.get('type') || '1';
+  const movieTitle   = searchParams.get('title') || 'Unknown Title';
+  const movieCover   = searchParams.get('cover') || '';
+  const tmdbId       = searchParams.get('tmdbId') || '';
+  const anilistId    = searchParams.get('anilistId') || '';
+  const isAnime      = searchParams.get('isAnime') === '1';
+  const isTVShow     = subjectType === '2';
+
+  // ─── Source selection ──────────────────────────────────────────────────────
+  const defaultSource: EmbedSource = isAnime ? 'anime2' : 'xcasper';
+  const [embedSource, setEmbedSource] = useState<EmbedSource>(defaultSource);
 
   // ─── Player state ──────────────────────────────────────────────────────────
-  const [streams,       setStreams]       = useState<StreamQuality[]>([]);
-  const [subtitles,     setSubtitles]     = useState<SubtitleTrack[]>([]);
-  const [audioTracks,   setAudioTracks]   = useState<AudioTrack[]>([]);
-  const [activeSubtitleVtt, setActiveSubtitleVtt] = useState<string | undefined>();
+  const [streams,            setStreams]            = useState<StreamQuality[]>([]);
+  const [subtitles,          setSubtitles]          = useState<SubtitleTrack[]>([]);
+  const [audioTracks,        setAudioTracks]        = useState<AudioTrack[]>([]);
+  const [activeSubtitleVtt,  setActiveSubtitleVtt]  = useState<string | undefined>();
   const [activeSubtitleLang, setActiveSubtitleLang] = useState<string>('en');
-  const [activeAudioIdx, setActiveAudioIdx] = useState(0);
-  const [streamLoading, setStreamLoading] = useState(true);
-  const [streamError,   setStreamError]   = useState(false);
+  const [activeAudioIdx,     setActiveAudioIdx]     = useState(0);
+  const [streamLoading,      setStreamLoading]      = useState(true);
+  const [streamError,        setStreamError]        = useState(false);
 
   // ─── TV show episode state ─────────────────────────────────────────────────
   const [seasons,          setSeasons]          = useState<SeasonInfo[]>([]);
   const [seasonsLoading,   setSeasonsLoading]   = useState(false);
   const [selectedSeason,   setSelectedSeason]   = useState(1);
-  const [currentEpIdx,     setCurrentEpIdx]     = useState(0); // index within season
+  const [currentEpIdx,     setCurrentEpIdx]     = useState(0);
   const [selectedEpisode,  setSelectedEpisode]  = useState<EpisodeInfo | null>(null);
   const [showEpisodePanel, setShowEpisodePanel] = useState(true);
 
   // ─── UI state ─────────────────────────────────────────────────────────────
-  const [inList,  setInList]  = useState(false);
-  const [showAd,  setShowAd]  = useState(false);
+  const [inList,           setInList]           = useState(false);
+  const [showAd,           setShowAd]           = useState(false);
+  const [showAdBlockBanner,setShowAdBlockBanner] = useState(true);
   const adTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Derived TMDB id (from URL param or fallback)
+  const effectiveTmdbId = tmdbId || id || '';
+  const effectiveAnilistId = anilistId || id || '';
+
+  // ─── Build embed URL ───────────────────────────────────────────────────────
+  const season  = selectedEpisode?.seasonNum  ?? 1;
+  const episode = selectedEpisode?.episodeNum ?? 1;
+
+  const embedUrl: Record<EmbedSource, string> = {
+    xcasper: '', // handled separately with VideoPlayer
+    anime2: isAnime
+      ? `https://2anime.xyz/embed/${effectiveAnilistId}/${episode}`
+      : '',
+    multiembed: isTVShow || isAnime
+      ? `https://multiembed.mov/?video_id=${effectiveTmdbId}&tmdb=1&s=${season}&e=${episode}`
+      : `https://multiembed.mov/?video_id=${effectiveTmdbId}&tmdb=1`,
+    vidsrc: isTVShow || isAnime
+      ? `https://vidsrc.me/embed/tv?tmdb=${effectiveTmdbId}&season=${season}&episode=${episode}`
+      : `https://vidsrc.me/embed/movie?tmdb=${effectiveTmdbId}`,
+  };
 
   // ─── ShowBox detail for cast ───────────────────────────────────────────────
   const { data: sbDetail } = useQuery({
@@ -506,102 +604,69 @@ export default function WatchPage() {
 
   useEffect(() => { if (id) setInList(isInWatchlist(id)); }, [id]);
 
-  // ─── Convert subtitle SRT → VTT when subtitle changes ─────────────────────
+  // ─── Subtitle SRT → VTT conversion ────────────────────────────────────────
   useEffect(() => {
-    // Revoke previous blob URL
-    if (activeSubtitleVtt?.startsWith('blob:')) {
-      URL.revokeObjectURL(activeSubtitleVtt);
-    }
+    if (activeSubtitleVtt?.startsWith('blob:')) URL.revokeObjectURL(activeSubtitleVtt);
     setActiveSubtitleVtt(undefined);
-
     const enSub = subtitles.find(s => s.languageCode === activeSubtitleLang || s.languageCode === 'en');
     if (!enSub?.url) return;
-
-    srtUrlToVttBlobUrl(enSub.url).then(vttUrl => {
-      if (vttUrl) setActiveSubtitleVtt(vttUrl);
-    });
-
-    return () => {
-      // Cleanup on unmount
-      if (activeSubtitleVtt?.startsWith('blob:')) {
-        URL.revokeObjectURL(activeSubtitleVtt);
-      }
-    };
+    srtUrlToVttBlobUrl(enSub.url).then(vttUrl => { if (vttUrl) setActiveSubtitleVtt(vttUrl); });
+    return () => { if (activeSubtitleVtt?.startsWith('blob:')) URL.revokeObjectURL(activeSubtitleVtt); };
   }, [subtitles, activeSubtitleLang]);
 
-  // ─── Load movie streams (non-TV) ─────────────────────────────────────────
+  // ─── Load movie streams (xcasper) ─────────────────────────────────────────
   const loadMovieStream = useCallback(async (subjectId: string) => {
     setStreamLoading(true);
     setStreamError(false);
     setStreams([]);
-    console.log('[WatchPage] Loading movie stream for subjectId:', subjectId);
-
     try {
       const result = await fetchPlayData(subjectId);
       if (result.streams.length > 0) {
-        // Sort by resolution descending
         const sorted = [...result.streams].sort((a, b) =>
           parseInt(String(b.resolutions || 0)) - parseInt(String(a.resolutions || 0))
         );
         setStreams(sorted);
         setSubtitles(result.subtitles);
         setAudioTracks(result.audioTracks);
-        console.log('[WatchPage] ✅ Movie streams:', sorted.length, '| subtitles:', result.subtitles.length, '| audio:', result.audioTracks.length);
       } else {
-        // Fallback: build bff/stream URLs directly from subjectId
-        console.warn('[WatchPage] /api/play returned no streams, falling back to bff/stream URLs');
-        const fallbackStreams: StreamQuality[] = ['1080', '720', '480', '360'].map(res => ({
+        const fallback: StreamQuality[] = ['1080', '720', '480', '360'].map(res => ({
           proxyUrl: `${SB_BASE}/bff/stream?subjectId=${subjectId}&resolution=${res}`,
-          resolutions: res,
-          quality: res,
+          resolutions: res, quality: res,
         }));
-        setStreams(fallbackStreams);
+        setStreams(fallback);
       }
-    } catch (err) {
-      console.error('[WatchPage] Movie stream error:', err);
-      // Still provide bff/stream fallback
-      const fallbackStreams: StreamQuality[] = ['1080', '720', '480', '360'].map(res => ({
+    } catch {
+      const fallback: StreamQuality[] = ['1080', '720', '480', '360'].map(res => ({
         proxyUrl: `${SB_BASE}/bff/stream?subjectId=${subjectId}&resolution=${res}`,
-        resolutions: res,
-        quality: res,
+        resolutions: res, quality: res,
       }));
-      setStreams(fallbackStreams);
+      setStreams(fallback);
     }
-
     setStreamLoading(false);
   }, []);
 
   // ─── Load TV show episodes ────────────────────────────────────────────────
   const loadTVEpisodes = useCallback(async (showSubjectId: string) => {
     setSeasonsLoading(true);
-    console.log('[WatchPage] Loading TV episodes for:', showSubjectId, movieTitle);
-
     const seasonData = await fetchShowEpisodes(showSubjectId, movieTitle);
     setSeasons(seasonData);
     setSeasonsLoading(false);
-
-    // Auto-play first episode
     if (seasonData.length > 0 && seasonData[0].episodes.length > 0) {
       const firstEp = seasonData[0].episodes[0];
       setSelectedSeason(seasonData[0].seasonNum);
       setCurrentEpIdx(0);
       setSelectedEpisode(firstEp);
-      // Load first episode's streams
-      await loadEpisodeStream(showSubjectId, firstEp);
+      if (embedSource === 'xcasper') await loadEpisodeStream(showSubjectId, firstEp);
     } else {
-      // No episodes found — try playing the show itself
-      console.warn('[WatchPage] No episodes found, playing show directly');
-      await loadMovieStream(showSubjectId);
+      if (embedSource === 'xcasper') await loadMovieStream(showSubjectId);
     }
-  }, [movieTitle]);
+  }, [movieTitle, embedSource]);
 
   // ─── Load episode stream ──────────────────────────────────────────────────
   const loadEpisodeStream = useCallback(async (showSubjectId: string, episode: EpisodeInfo) => {
     setStreamLoading(true);
     setStreamError(false);
     setStreams([]);
-    console.log('[WatchPage] Loading episode stream:', `S${episode.seasonNum}E${episode.episodeNum}`, episode.name, '| subjectId:', episode.subjectId || '(none)');
-
     try {
       const result = await fetchEpisodeStreams(showSubjectId, episode);
       if (result.streams.length > 0) {
@@ -611,54 +676,49 @@ export default function WatchPage() {
         setStreams(sorted);
         setSubtitles(result.subtitles);
         setAudioTracks(result.audioTracks);
-        console.log('[WatchPage] ✅ Episode streams:', sorted.length);
       } else {
         setStreamError(true);
       }
-    } catch (err) {
-      console.error('[WatchPage] Episode stream error:', err);
+    } catch {
       setStreamError(true);
     }
-
     setStreamLoading(false);
   }, []);
 
   // ─── Initial load ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (!id || authLoading || !session) return;
+    // For anime or embed-only sources, no XCASPER fetch needed
+    if (isAnime && embedSource !== 'xcasper') { setStreamLoading(false); return; }
+    if (embedSource !== 'xcasper') { setStreamLoading(false); return; }
+    if (isTVShow) loadTVEpisodes(id);
+    else loadMovieStream(id);
+  }, [id, isTVShow, isAnime, authLoading, session, embedSource]);
 
-    if (isTVShow) {
-      // TV: fetch episodes first, then auto-play ep 1
-      loadTVEpisodes(id);
-    } else {
-      // Movie: directly call /api/play with the show's subjectId
-      loadMovieStream(id);
-    }
-  }, [id, isTVShow, authLoading, session, loadTVEpisodes, loadMovieStream]);
+  // When source changes away from xcasper, stop loading
+  useEffect(() => {
+    if (embedSource !== 'xcasper') setStreamLoading(false);
+  }, [embedSource]);
 
   // ─── Episode click handler ────────────────────────────────────────────────
   const handleEpisodeClick = useCallback(async (episode: EpisodeInfo, epIdx: number) => {
     if (!id) return;
     setSelectedEpisode(episode);
     setCurrentEpIdx(epIdx);
-    await loadEpisodeStream(id, episode);
-    // Scroll to top of player
+    if (embedSource === 'xcasper') await loadEpisodeStream(id, episode);
     window.scrollTo({ top: 68, behavior: 'smooth' });
-  }, [id, loadEpisodeStream]);
+  }, [id, loadEpisodeStream, embedSource]);
 
   // ─── Next episode ─────────────────────────────────────────────────────────
   const handleNextEpisode = useCallback(async () => {
     const currentSeason = seasons.find(s => s.seasonNum === selectedSeason);
     if (!currentSeason) return;
-
     const nextIdx = currentEpIdx + 1;
     if (nextIdx < currentSeason.episodes.length) {
-      // Next episode in same season
       await handleEpisodeClick(currentSeason.episodes[nextIdx], nextIdx);
     } else {
-      // Try next season
       const nextSeason = seasons.find(s => s.seasonNum === selectedSeason + 1);
-      if (nextSeason && nextSeason.episodes.length > 0) {
+      if (nextSeason?.episodes.length) {
         setSelectedSeason(nextSeason.seasonNum);
         await handleEpisodeClick(nextSeason.episodes[0], 0);
         toast.success(`Season ${nextSeason.seasonNum}, Episode 1`);
@@ -672,7 +732,6 @@ export default function WatchPage() {
   const handleAudioTrackChange = useCallback(async (track: AudioTrack, idx: number) => {
     if (!track.subjectId) return;
     setActiveAudioIdx(idx);
-    console.log('[audio] Switching to:', track.language, '| subjectId:', track.subjectId);
     try {
       const result = await fetchPlayData(track.subjectId);
       if (result.streams.length > 0) {
@@ -689,10 +748,10 @@ export default function WatchPage() {
 
   // ─── Mid-stream ad timer ──────────────────────────────────────────────────
   useEffect(() => {
-    if (isPremium) return;
+    if (isPremium || embedSource !== 'xcasper') return;
     adTimerRef.current = setTimeout(() => setShowAd(true), 20 * 60 * 1000);
     return () => { if (adTimerRef.current) clearTimeout(adTimerRef.current); };
-  }, [isPremium]);
+  }, [isPremium, embedSource]);
 
   // ─── Related content ──────────────────────────────────────────────────────
   const { data: relatedData } = useQuery({
@@ -731,9 +790,8 @@ export default function WatchPage() {
     else { navigator.clipboard.writeText(window.location.href); toast.success('Link copied!'); }
   };
 
-  // ─── Current season's episodes ────────────────────────────────────────────
   const currentSeasonData = seasons.find(s => s.seasonNum === selectedSeason) || seasons[0];
-  const currentEpisodes = currentSeasonData?.episodes || [];
+  const currentEpisodes   = currentSeasonData?.episodes || [];
 
   // ─── Auth / loading guards ────────────────────────────────────────────────
   if (authLoading) {
@@ -751,7 +809,8 @@ export default function WatchPage() {
   if (!id) return <div className="min-h-screen bg-[#0d0d0d] flex items-center justify-center text-white">Invalid content</div>;
 
   const activeStream = streams[0];
-  const isLoading = streamLoading || (isTVShow && seasonsLoading && seasons.length === 0);
+  const isXcasperLoading = embedSource === 'xcasper' && (streamLoading || (isTVShow && seasonsLoading && seasons.length === 0));
+  const useEmbedIframe   = embedSource !== 'xcasper';
 
   return (
     <div className="min-h-screen bg-[#0d0d0d]">
@@ -765,9 +824,16 @@ export default function WatchPage() {
           <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
             <div className="xl:col-span-3 space-y-5">
 
+              {/* ── Ad Blocker Banner ──────────────────────────────────────── */}
+              {showAdBlockBanner && (useEmbedIframe) && (
+                <AdBlockerBanner onDismiss={() => setShowAdBlockBanner(false)} />
+              )}
+
               {/* ── Player ────────────────────────────────────────────────── */}
               <div className="relative">
-                {isLoading ? (
+                {useEmbedIframe ? (
+                  <EmbedPlayer src={embedUrl[embedSource]} title={movieTitle} />
+                ) : isXcasperLoading ? (
                   <div className="w-full aspect-video bg-gradient-to-br from-gray-900 to-[#111] rounded-2xl flex flex-col items-center justify-center gap-4 border border-gray-800/50">
                     <Loader size={36} className="text-[#e50914] animate-spin" />
                     <p className="text-gray-400 text-sm font-semibold">
@@ -781,28 +847,29 @@ export default function WatchPage() {
                   </div>
                 ) : streamError ? (
                   <div className="w-full aspect-video bg-gradient-to-br from-gray-900 to-[#111] rounded-2xl flex flex-col items-center justify-center gap-5 border border-gray-800/50">
-                    <svg width="56" height="56" viewBox="0 0 24 24" fill="none">
-                      <rect x="2" y="4" width="20" height="14" rx="3" stroke="#374151" strokeWidth="1.5" />
-                      <path d="M10 9l4 3-4 3V9z" fill="#374151" />
-                      <path d="M8 21h8M12 18v3" stroke="#374151" strokeWidth="1.5" strokeLinecap="round" />
-                    </svg>
+                    <AlertTriangle size={48} className="text-gray-700" />
                     <div className="text-center px-6">
                       <p className="text-white font-black text-base mb-1">Stream Not Found</p>
-                      <p className="text-gray-600 text-sm leading-relaxed">
+                      <p className="text-gray-600 text-sm leading-relaxed mb-4">
                         {selectedEpisode
-                          ? `S${selectedEpisode.seasonNum}E${selectedEpisode.episodeNum} is not available.`
-                          : `"${movieTitle}" stream is not available right now.`}
+                          ? `S${selectedEpisode.seasonNum}E${selectedEpisode.episodeNum} is not available on this server.`
+                          : `"${movieTitle}" is not available on Server 1.`}
                       </p>
+                      <p className="text-gray-500 text-xs">Try switching to Server 2 or Server 3 below</p>
                     </div>
-                    <button
-                      onClick={() => {
+                    <div className="flex gap-2">
+                      <button onClick={() => { setEmbedSource('multiembed'); }}
+                        className="bg-[#e50914] text-white px-5 py-2.5 rounded-xl text-sm font-black hover:bg-red-700 transition-colors">
+                        Try Server 2
+                      </button>
+                      <button onClick={() => {
                         if (selectedEpisode && id) loadEpisodeStream(id, selectedEpisode);
                         else if (id) loadMovieStream(id);
                       }}
-                      className="flex items-center gap-2 bg-[#e50914] text-white px-5 py-2.5 rounded-xl text-sm font-black hover:bg-red-700 transition-colors"
-                    >
-                      <RefreshCw size={14} /> Try Again
-                    </button>
+                        className="flex items-center gap-2 border border-gray-700 text-gray-400 hover:text-white px-5 py-2.5 rounded-xl text-sm font-black transition-colors">
+                        <RefreshCw size={14} /> Retry
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <div className="relative">
@@ -826,8 +893,38 @@ export default function WatchPage() {
                 )}
               </div>
 
-              {/* ── Stream status bar ──────────────────────────────────────── */}
-              {!isLoading && !streamError && streams.length > 0 && (
+              {/* ── Source Switcher ────────────────────────────────────────── */}
+              <div className="bg-[#141414] rounded-xl px-4 py-3 border border-gray-800/40">
+                <SourceTabs
+                  active={embedSource}
+                  onChange={src => {
+                    setEmbedSource(src);
+                    if (src === 'xcasper' && streams.length === 0) {
+                      if (isTVShow && id) {
+                        if (seasons.length === 0) loadTVEpisodes(id);
+                        else if (selectedEpisode) loadEpisodeStream(id, selectedEpisode);
+                        else loadMovieStream(id);
+                      } else if (id) {
+                        loadMovieStream(id);
+                      }
+                    }
+                  }}
+                  isAnime={isAnime}
+                  isTVShow={isTVShow}
+                />
+                <p className="text-gray-700 text-[11px] mt-2">
+                  {embedSource === 'xcasper'
+                    ? 'Direct HD stream. If it fails, switch servers.'
+                    : embedSource === 'anime2'
+                    ? '2Anime embed — best for anime. Enable ad blocker for clean experience.'
+                    : embedSource === 'multiembed'
+                    ? 'MultiEmbed player — works for most titles. Enable ad blocker.'
+                    : 'VidSrc player — alternate backup server. Enable ad blocker.'}
+                </p>
+              </div>
+
+              {/* ── Stream status bar (xcasper only) ──────────────────────── */}
+              {embedSource === 'xcasper' && !isXcasperLoading && !streamError && streams.length > 0 && (
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xs text-green-400 bg-green-950/30 border border-green-800/30 px-2.5 py-1 rounded-full font-semibold flex items-center gap-1.5">
                     <svg width="8" height="8" viewBox="0 0 8 8"><circle cx="4" cy="4" r="4" fill="currentColor" /></svg>
@@ -835,57 +932,51 @@ export default function WatchPage() {
                     {activeStream?.resolutions ? ` · ${activeStream.resolutions}p` : ''}
                     {selectedEpisode ? ` · S${selectedEpisode.seasonNum}E${selectedEpisode.episodeNum}` : ''}
                   </span>
-                  {/* Subtitle selector */}
                   {subtitles.length > 0 && (
                     <div className="flex items-center gap-1">
                       <span className="text-xs text-gray-600">CC:</span>
-                      <select
-                        value={activeSubtitleLang}
-                        onChange={e => setActiveSubtitleLang(e.target.value)}
-                        className="text-xs bg-gray-800 text-gray-300 border border-gray-700 rounded-lg px-2 py-0.5 focus:outline-none"
-                      >
+                      <select value={activeSubtitleLang} onChange={e => setActiveSubtitleLang(e.target.value)}
+                        className="text-xs bg-gray-800 text-gray-300 border border-gray-700 rounded-lg px-2 py-0.5 focus:outline-none">
                         <option value="">Off</option>
-                        {subtitles.map(s => (
-                          <option key={s.languageCode} value={s.languageCode}>{s.language}</option>
-                        ))}
+                        {subtitles.map(s => <option key={s.languageCode} value={s.languageCode}>{s.language}</option>)}
                       </select>
                     </div>
                   )}
-                  {/* Audio track selector */}
                   {audioTracks.length > 1 && (
                     <div className="flex items-center gap-1">
                       <Volume2 size={11} className="text-gray-600" />
-                      <select
-                        value={activeAudioIdx}
-                        onChange={e => {
-                          const idx = parseInt(e.target.value);
-                          handleAudioTrackChange(audioTracks[idx], idx);
-                        }}
-                        className="text-xs bg-gray-800 text-gray-300 border border-gray-700 rounded-lg px-2 py-0.5 focus:outline-none"
-                      >
-                        {audioTracks.map((a, i) => (
-                          <option key={i} value={i}>{a.language}</option>
-                        ))}
+                      <select value={activeAudioIdx} onChange={e => { const idx = parseInt(e.target.value); handleAudioTrackChange(audioTracks[idx], idx); }}
+                        className="text-xs bg-gray-800 text-gray-300 border border-gray-700 rounded-lg px-2 py-0.5 focus:outline-none">
+                        {audioTracks.map((a, i) => <option key={i} value={i}>{a.language}</option>)}
                       </select>
                     </div>
                   )}
-                  <button
-                    onClick={() => {
-                      if (selectedEpisode && id) loadEpisodeStream(id, selectedEpisode);
-                      else if (id) loadMovieStream(id);
-                    }}
-                    className="text-xs text-gray-600 hover:text-gray-400 transition-colors flex items-center gap-1"
-                  >
+                  <button onClick={() => {
+                    if (selectedEpisode && id) loadEpisodeStream(id, selectedEpisode);
+                    else if (id) loadMovieStream(id);
+                  }} className="text-xs text-gray-600 hover:text-gray-400 transition-colors flex items-center gap-1">
                     <RefreshCw size={11} /> Refresh
                   </button>
-                  {/* Next episode button */}
                   {isTVShow && currentEpisodes.length > 0 && (
-                    <button
-                      onClick={handleNextEpisode}
-                      className="flex items-center gap-1.5 text-xs font-bold text-purple-400 hover:text-purple-300 bg-purple-900/20 border border-purple-800/30 px-3 py-1 rounded-full transition-colors"
-                    >
+                    <button onClick={handleNextEpisode}
+                      className="flex items-center gap-1.5 text-xs font-bold text-purple-400 hover:text-purple-300 bg-purple-900/20 border border-purple-800/30 px-3 py-1 rounded-full transition-colors">
                       <SkipForward size={11} /> Next Episode
                     </button>
+                  )}
+                </div>
+              )}
+
+              {/* ── Embed next episode bar ─────────────────────────────────── */}
+              {useEmbedIframe && isTVShow && currentEpisodes.length > 0 && (
+                <div className="flex items-center gap-3 flex-wrap">
+                  <button onClick={handleNextEpisode}
+                    className="flex items-center gap-1.5 text-xs font-bold text-purple-400 hover:text-purple-300 bg-purple-900/20 border border-purple-800/30 px-3 py-1.5 rounded-full transition-colors">
+                    <SkipForward size={11} /> Next Episode
+                  </button>
+                  {selectedEpisode && (
+                    <span className="text-gray-600 text-xs">
+                      S{selectedEpisode.seasonNum}E{selectedEpisode.episodeNum} — {selectedEpisode.name}
+                    </span>
                   )}
                 </div>
               )}
@@ -904,12 +995,12 @@ export default function WatchPage() {
                       <p className="text-gray-500 text-xs mt-2 leading-relaxed max-w-xl">{selectedEpisode.synopsis}</p>
                     )}
                     <div className="flex flex-wrap items-center gap-2 mt-2">
-                      <span className={`text-xs font-black px-2.5 py-1 rounded-lg flex items-center gap-1.5 ${isTVShow ? 'bg-purple-600/20 text-purple-400' : 'bg-blue-600/20 text-blue-400'}`}>
-                        {isTVShow ? <><Tv size={11} /> TV Series</> : <><Play size={11} /> Movie</>}
+                      <span className={`text-xs font-black px-2.5 py-1 rounded-lg flex items-center gap-1.5 ${
+                        isAnime ? 'bg-pink-600/20 text-pink-400' :
+                        isTVShow ? 'bg-purple-600/20 text-purple-400' : 'bg-blue-600/20 text-blue-400'
+                      }`}>
+                        {isAnime ? '🌸 Anime' : isTVShow ? <><Tv size={11} /> TV Series</> : <><Play size={11} /> Movie</>}
                       </span>
-                      {seasons.length > 0 && (
-                        <span className="text-xs text-gray-600">{seasons.length} Season{seasons.length > 1 ? 's' : ''}</span>
-                      )}
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-2 flex-shrink-0">
@@ -921,7 +1012,7 @@ export default function WatchPage() {
                       className="flex items-center gap-1.5 text-sm px-4 py-2 rounded-xl border border-gray-700 text-gray-400 hover:border-gray-500 hover:text-white transition-all font-semibold">
                       <Share2 size={14} /> Share
                     </button>
-                    {!isTVShow && activeStream?.proxyUrl && (
+                    {!isTVShow && embedSource === 'xcasper' && activeStream?.proxyUrl && (
                       <a href={activeStream.proxyUrl} download={`${movieTitle}.mp4`}
                         className="flex items-center gap-1.5 text-sm px-4 py-2 rounded-xl border border-gray-700 text-gray-400 hover:border-blue-500 hover:text-blue-400 transition-all font-semibold">
                         <Download size={14} /> Download
@@ -931,32 +1022,30 @@ export default function WatchPage() {
                 </div>
               </div>
 
-              {/* ── TV Episode Panel ───────────────────────────────────────── */}
-              {isTVShow && (
+              {/* ── TV / Anime Episode Panel ───────────────────────────────── */}
+              {(isTVShow || isAnime) && (
                 <div className="bg-[#141414] rounded-2xl border border-gray-800/40 overflow-hidden">
-                  {/* Panel header */}
                   <div className="flex items-center justify-between p-5 border-b border-gray-800/40">
                     <button onClick={() => setShowEpisodePanel(!showEpisodePanel)}
                       className="flex items-center gap-2 hover:text-white transition-colors flex-1 text-left">
                       <h2 className="text-white font-black text-base flex items-center gap-2">
-                        <Tv size={16} className="text-purple-400" /> Episodes
+                        {isAnime ? '🎌' : <Tv size={16} className="text-purple-400" />} Episodes
                         {currentEpisodes.length > 0 && (
                           <span className="text-xs text-gray-500 font-normal">({currentEpisodes.length} eps)</span>
                         )}
                       </h2>
                       <ChevronDown size={18} className={`text-gray-500 transition-transform ${showEpisodePanel ? 'rotate-180' : ''}`} />
                     </button>
-                    {selectedEpisode && activeStream?.proxyUrl && (
+                    {selectedEpisode && embedSource === 'xcasper' && activeStream?.proxyUrl && (
                       <a href={activeStream.proxyUrl} download
                         className="flex items-center gap-2 text-xs font-bold text-gray-400 hover:text-white border border-gray-700 hover:border-gray-500 px-3.5 py-2 rounded-xl transition-all flex-shrink-0 ml-3">
-                        <Download size={13} /> Download
+                        <Download size={13} /> Download Ep
                       </a>
                     )}
                   </div>
 
                   {showEpisodePanel && (
                     <div>
-                      {/* Season tabs */}
                       {seasons.length > 1 && (
                         <div className="flex gap-2 px-5 py-3 overflow-x-auto scrollbar-hide border-b border-gray-800/40">
                           {seasons.map(s => (
@@ -973,11 +1062,34 @@ export default function WatchPage() {
                           <Loader size={20} className="text-purple-400 animate-spin" />
                           <span className="text-gray-500 text-sm">Loading episodes…</span>
                         </div>
-                      ) : currentEpisodes.length === 0 ? (
+                      ) : currentEpisodes.length === 0 && !isAnime ? (
                         <div className="text-center py-10 px-5">
                           <Tv size={36} className="text-gray-800 mx-auto mb-3" />
                           <p className="text-gray-600 text-sm font-semibold">Episode list unavailable</p>
-                          <p className="text-gray-700 text-xs mt-1">Stream is playing above.</p>
+                          <p className="text-gray-700 text-xs mt-1">Use the embed player above — it plays directly.</p>
+                        </div>
+                      ) : isAnime && currentEpisodes.length === 0 ? (
+                        // Anime: show episode number input for 2anime
+                        <div className="p-5">
+                          <p className="text-gray-500 text-sm mb-3">Episode list not loaded. Pick an episode number manually:</p>
+                          <div className="flex items-center gap-3">
+                            {[1,2,3,4,5,6,7,8,9,10,11,12,13].map(ep => (
+                              <button key={ep} onClick={() => {
+                                const fakeEp: EpisodeInfo = {
+                                  subjectId: '', episodeNum: ep, seasonNum: 1,
+                                  name: `Episode ${ep}`,
+                                };
+                                setSelectedEpisode(fakeEp);
+                              }}
+                                className={`w-9 h-9 rounded-lg text-sm font-bold transition-all ${
+                                  selectedEpisode?.episodeNum === ep
+                                    ? 'bg-pink-600 text-white'
+                                    : 'bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white'
+                                }`}>
+                                {ep}
+                              </button>
+                            ))}
+                          </div>
                         </div>
                       ) : (
                         <div className="divide-y divide-gray-800/40 max-h-[480px] overflow-y-auto">
@@ -990,7 +1102,6 @@ export default function WatchPage() {
                                 onClick={() => handleEpisodeClick(ep, epIdx)}
                                 className={`w-full flex items-center gap-3 px-5 py-3.5 hover:bg-gray-900/50 text-left transition-colors group ${isActive ? 'bg-purple-900/20' : ''}`}
                               >
-                                {/* Thumbnail */}
                                 <div className="w-24 h-14 flex-shrink-0 rounded-xl overflow-hidden bg-gray-900 relative">
                                   {ep.cover ? (
                                     <img src={ep.cover} alt={ep.name}
@@ -1010,8 +1121,6 @@ export default function WatchPage() {
                                     </div>
                                   </div>
                                 </div>
-
-                                {/* Episode info */}
                                 <div className="flex-1 min-w-0">
                                   <p className={`text-sm font-bold truncate ${isActive ? 'text-purple-400' : 'text-white'}`}>
                                     Ep {ep.episodeNum}: {ep.name}
@@ -1026,8 +1135,6 @@ export default function WatchPage() {
                                     </div>
                                   )}
                                 </div>
-
-                                {/* Duration + next arrow */}
                                 <div className="flex flex-col items-end gap-1 flex-shrink-0">
                                   {ep.duration && ep.duration > 0 && (
                                     <span className="text-gray-700 text-[10px]">{ep.duration}min</span>

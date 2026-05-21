@@ -107,7 +107,7 @@ export default function MovieDetailPage() {
 
   const recList = recommended.length > 0 ? recommended : fallbackRec;
   const typeLabel = displayMovie.subjectType === 1 ? 'Movie' : 'TV Series';
-  const watchUrl = `/watch/${id}?type=${displayMovie.subjectType}&title=${encodeURIComponent(displayMovie.title)}&cover=${encodeURIComponent(displayMovie.cover?.url || '')}&detailPath=${encodeURIComponent(displayMovie.detailPath || '')}`;
+  const watchUrl = `/watch/${id}?type=${displayMovie.subjectType}&title=${encodeURIComponent(displayMovie.title)}&cover=${encodeURIComponent(displayMovie.cover?.url || '')}&detailPath=${encodeURIComponent(displayMovie.detailPath || '')}&tmdbId=${id}`;
 
 
   const handleWatchlist = () => {
