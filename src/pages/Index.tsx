@@ -219,16 +219,17 @@ export default function Index() {
               <Link to="/premium" className="inline-block bg-white text-black font-black px-10 py-4 rounded-2xl text-base hover:bg-gray-100 transition-all shadow-2xl hover:-translate-y-0.5">
                 Get PlayMax+
               </Link>
-              <p className="text-gray-600 text-xs mt-3">Starting from ₦2,000/week · Cancel anytime</p>
+              <p className="text-gray-600 text-xs mt-3">Starting from TSh 2,000/week · Cancel anytime</p>
             </div>
           </div>
         </div>
 
         <div className="text-center pb-4 px-4">
-          <p className="text-gray-700 text-xs">Made with care by <span className="text-gray-500 font-semibold">Damini × Nicky Tech</span></p>
+          <p className="text-gray-700 text-xs">Made with care by <span className="text-gray-500 font-semibold">STANY TZ</span></p>
         </div>
       </main>
       <Footer />
     </div>
   );
 }
+
